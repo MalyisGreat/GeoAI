@@ -53,6 +53,8 @@ def main() -> None:
     parser.add_argument("--limit-shards", type=int, default=None)
     parser.add_argument("--metadata-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-index", action="store_true")
+    parser.add_argument("--force-manifest", action="store_true")
     parser.add_argument("--log-dir", default="logs/h100-sync")
     args = parser.parse_args()
 
@@ -106,14 +108,42 @@ def main() -> None:
         },
     )
 
-    built_manifests = []
-    for split in args.splits:
-        result = provider.prepare(split=split, max_rows=None, download_images=False)
-        built_manifests.append(result.__dict__)
-
     index_path = None
     if not args.metadata_only and bool(config["download"].get("index_archives", True)):
-        index_path = build_zip_member_index(provider.raw_root, provider.raw_root / "zip_member_index.parquet")
+        index_started = time.perf_counter()
+        index_path = build_zip_member_index(
+            provider.raw_root,
+            provider.raw_root / "zip_member_index.parquet",
+            max_workers=int(config["download"].get("index_max_workers", max_workers)),
+            force=args.force_index,
+        )
+        log_event(
+            log_path,
+            {
+                "event": "index-complete",
+                "seconds": round(time.perf_counter() - index_started, 3),
+                "index_path": str(index_path),
+            },
+        )
+
+    built_manifests = []
+    manifest_started = time.perf_counter()
+    for split in args.splits:
+        result = provider.prepare(
+            split=split,
+            max_rows=None,
+            download_images=False,
+            force_rebuild=args.force_manifest,
+        )
+        built_manifests.append(result.__dict__)
+    log_event(
+        log_path,
+        {
+            "event": "manifest-complete",
+            "seconds": round(time.perf_counter() - manifest_started, 3),
+            "manifests": built_manifests,
+        },
+    )
 
     final = {
         "event": "sync-finished",

@@ -37,6 +37,17 @@ def resolve_device(requested: str) -> torch.device:
     return torch.device("cpu")
 
 
+def configure_runtime(device: torch.device, config: dict[str, Any]) -> None:
+    if device.type != "cuda":
+        return
+    torch.backends.cudnn.benchmark = bool(config["train"].get("cudnn_benchmark", True))
+    if bool(config["train"].get("allow_tf32", True)):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision(str(config["train"].get("matmul_precision", "high")))
+
+
 def _maybe_sample(frame: pd.DataFrame, limit: int | None, seed: int) -> pd.DataFrame:
     if limit is None or len(frame) <= limit:
         return frame.reset_index(drop=True)
@@ -73,11 +84,14 @@ def _make_loaders(
         "num_workers": num_workers,
         "pin_memory": bool(config["train"].get("pin_memory", False)),
         "persistent_workers": num_workers > 0,
+        "prefetch_factor": int(config["train"].get("prefetch_factor", 2)) if num_workers > 0 else None,
     }
+    loader_kwargs = {key: value for key, value in loader_kwargs.items() if value is not None}
     train_loader = DataLoader(
         train_ds,
         batch_size=int(config["train"]["batch_size"]),
         shuffle=True,
+        drop_last=bool(config["train"].get("drop_last", False)),
         **loader_kwargs,
     )
     val_loader = DataLoader(
@@ -92,7 +106,7 @@ def _make_loaders(
 def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     moved: dict[str, Any] = {}
     for key, value in batch.items():
-        moved[key] = value.to(device) if torch.is_tensor(value) else value
+        moved[key] = value.to(device, non_blocking=True) if torch.is_tensor(value) else value
     return moved
 
 
@@ -285,14 +299,19 @@ def _train_one_epoch(
     total_batches = 0
     total_images = 0
     start_time = time.perf_counter()
+    epoch_log_path = Path(config["train"].get("_train_step_log_path", ""))
+    last_step_end = start_time
 
     for step, batch in enumerate(loader, start=1):
+        batch_ready_time = time.perf_counter()
+        data_wait_seconds = batch_ready_time - last_step_end
         batch = _move_batch(batch, device)
         images = batch["image"]
         if bool(config["train"].get("channels_last", False)) and device.type == "cuda":
             images = images.contiguous(memory_format=torch.channels_last)
             batch["image"] = images
 
+        compute_start = time.perf_counter()
         with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_autocast):
             outputs = model(batch["image"])
             loss, components = _compute_loss(outputs, batch, config)
@@ -318,6 +337,23 @@ def _train_one_epoch(
             aggregates[key] += value
         total_batches += 1
         total_images += int(batch["image"].shape[0])
+        step_end = time.perf_counter()
+        compute_seconds = step_end - compute_start
+        total_step_seconds = step_end - batch_ready_time
+        if epoch_log_path and step % int(config["train"].get("log_every_steps", 20)) == 0:
+            log_event(
+                epoch_log_path,
+                {
+                    "epoch": int(config["train"].get("_current_epoch", 0)),
+                    "step": step,
+                    "loss": components["loss"],
+                    "data_wait_seconds": data_wait_seconds,
+                    "compute_seconds": compute_seconds,
+                    "step_seconds": total_step_seconds,
+                    "step_samples_per_sec": batch["image"].shape[0] / max(total_step_seconds, 1e-6),
+                },
+            )
+        last_step_end = step_end
 
     duration = max(1e-6, time.perf_counter() - start_time)
     return {
@@ -357,12 +393,14 @@ def _save_checkpoint(
 def run_training(config: dict[str, Any]) -> dict[str, Any]:
     set_seed(int(config["seed"]))
     device = resolve_device(str(config["runtime"].get("device", "auto")))
+    configure_runtime(device, config)
     if bool(config["runtime"].get("deterministic", False)):
         torch.use_deterministic_algorithms(True)
 
     run_dirs = init_run_dirs(config["project_root"], config["experiment_name"])
     save_summary(run_dirs["artifacts"] / "system.json", system_snapshot())
 
+    prepare_started = time.perf_counter()
     train_frame, val_frame, label_maps = _prepare_frames(config)
     save_manifest(train_frame, run_dirs["artifacts"] / "train_manifest.parquet")
     save_manifest(val_frame, run_dirs["artifacts"] / "val_manifest.parquet")
@@ -371,8 +409,12 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         label_maps,
         num_fine_classes=int(train_frame["fine_idx"].max()) + 1,
     )
+    prepare_seconds = time.perf_counter() - prepare_started
 
+    loader_started = time.perf_counter()
     train_ds, val_ds, train_loader, val_loader = _make_loaders(train_frame, val_frame, config)
+    loader_seconds = time.perf_counter() - loader_started
+    model_started = time.perf_counter()
     categorical_heads = config["model"].get("auxiliary_categorical_heads") or list(
         label_maps.aux_categorical.keys()
     )
@@ -398,18 +440,24 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         },
         numeric_head_names=[name for name in numeric_heads if name in label_maps.aux_numeric_stats],
     ).to(device)
+    model_init_seconds = time.perf_counter() - model_started
 
     if bool(config["train"].get("compile", False)) and device.type == "cuda" and hasattr(torch, "compile"):
         try:
-            model = torch.compile(model)  # type: ignore[assignment]
+            model = torch.compile(
+                model,
+                mode=str(config["train"].get("compile_mode", "reduce-overhead")),
+            )  # type: ignore[assignment]
         except Exception:
             pass
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config["train"]["learning_rate"]),
-        weight_decay=float(config["train"]["weight_decay"]),
-    )
+    optimizer_kwargs = {
+        "lr": float(config["train"]["learning_rate"]),
+        "weight_decay": float(config["train"]["weight_decay"]),
+    }
+    if device.type == "cuda" and bool(config["train"].get("fused_optimizer", True)):
+        optimizer_kwargs["fused"] = True
+    optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, int(config["train"]["epochs"]))
     )
@@ -418,8 +466,21 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
     best_checkpoint = run_dirs["checkpoints"] / "best.pt"
     train_log = run_dirs["metrics"] / "train.jsonl"
     val_log = run_dirs["metrics"] / "val.jsonl"
+    step_log = run_dirs["metrics"] / "train_steps.jsonl"
+    save_summary(
+        run_dirs["artifacts"] / "startup.json",
+        {
+            "prepare_seconds": prepare_seconds,
+            "loader_seconds": loader_seconds,
+            "model_init_seconds": model_init_seconds,
+            "num_train_rows": len(train_frame),
+            "num_val_rows": len(val_frame),
+        },
+    )
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
+        config["train"]["_current_epoch"] = epoch
+        config["train"]["_train_step_log_path"] = str(step_log)
         train_metrics = _train_one_epoch(model, train_loader, optimizer, device=device, config=config)
         train_metrics["epoch"] = epoch
         log_event(train_log, train_metrics)
@@ -460,6 +521,9 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         "run_root": str(run_dirs["root"]),
         "num_experts": int(config["model"].get("num_experts", 4)),
         "posterior_components": int(config["model"].get("posterior_components", 8)),
+        "prepare_seconds": prepare_seconds,
+        "loader_seconds": loader_seconds,
+        "model_init_seconds": model_init_seconds,
     }
     save_summary(run_dirs["root"] / "summary.json", summary)
     return summary

@@ -27,6 +27,7 @@ download:
   cleanup_archives: false
   snapshot_max_workers: 32
   index_archives: true
+  index_max_workers: 24
 
 model:
   backbone: timm:vit_base_patch14_dinov2.lvd142m
@@ -57,10 +58,17 @@ train:
   accumulate_steps: 1
   grad_clip_norm: 1.0
   num_workers: 24
+  prefetch_factor: 4
+  drop_last: true
   amp: bf16
   compile: true
+  compile_mode: reduce-overhead
   channels_last: true
   pin_memory: true
+  fused_optimizer: true
+  allow_tf32: true
+  cudnn_benchmark: true
+  matmul_precision: high
   log_every_steps: 20
   checkpoint_dir: runs/checkpoints
   metrics_dir: runs/metrics

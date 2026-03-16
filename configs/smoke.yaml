@@ -46,10 +46,17 @@ train:
   accumulate_steps: 1
   grad_clip_norm: 1.0
   num_workers: 0
+  prefetch_factor: 2
+  drop_last: false
   amp: none
   compile: false
+  compile_mode: reduce-overhead
   channels_last: false
   pin_memory: false
+  fused_optimizer: false
+  allow_tf32: false
+  cudnn_benchmark: false
+  matmul_precision: high
   log_every_steps: 1
   checkpoint_dir: runs/checkpoints
   metrics_dir: runs/metrics

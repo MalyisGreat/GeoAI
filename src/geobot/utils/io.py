@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +76,20 @@ def extract_zip_file(zip_path: str | Path, destination: str | Path) -> None:
 def build_zip_member_index(
     root: str | Path,
     output_path: str | Path | None = None,
+    *,
+    max_workers: int = 8,
+    force: bool = False,
 ) -> Path:
     root = Path(root)
     output_path = Path(output_path) if output_path is not None else root / "zip_member_index.parquet"
+    if output_path.exists() and not force:
+        newest_archive_mtime = max((path.stat().st_mtime for path in root.rglob("*.zip")), default=0.0)
+        if output_path.stat().st_mtime >= newest_archive_mtime:
+            return output_path
     archives = sorted(root.rglob("*.zip"))
-    rows: list[dict[str, str]] = []
-    for archive_path in archives:
+
+    def _index_archive(archive_path: Path) -> list[dict[str, str]]:
+        archive_rows: list[dict[str, str]] = []
         with zipfile.ZipFile(archive_path, "r") as archive:
             for info in archive.infolist():
                 if info.is_dir():
@@ -88,13 +97,20 @@ def build_zip_member_index(
                 suffix = Path(info.filename).suffix.lower()
                 if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
                     continue
-                rows.append(
+                archive_rows.append(
                     {
                         "filename": Path(info.filename).name,
                         "member_name": info.filename,
                         "archive_path": str(archive_path.resolve()),
                     }
                 )
+        return archive_rows
+
+    rows: list[dict[str, str]] = []
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        futures = {executor.submit(_index_archive, archive_path): archive_path for archive_path in archives}
+        for future in as_completed(futures):
+            rows.extend(future.result())
     frame = pd.DataFrame(rows).drop_duplicates(subset=["filename"], keep="first")
     save_manifest(frame, output_path)
     return output_path

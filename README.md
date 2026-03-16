@@ -79,7 +79,9 @@ Useful logs:
 - `logs/a100/<timestamp>/train-console.log`
 - `logs/a100/<timestamp>/download/sync.jsonl`
 - `runs/atlasmoe-h100/metrics/train.jsonl`
+- `runs/atlasmoe-h100/metrics/train_steps.jsonl`
 - `runs/atlasmoe-h100/metrics/val.jsonl`
+- `runs/atlasmoe-h100/artifacts/startup.json`
 
 ## Open data used
 

@@ -28,6 +28,7 @@ def main() -> None:
     parser.add_argument("--config", default="configs/smoke.yaml")
     parser.add_argument("--output", default="benchmarks/latest-metrics.json")
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument("--warmup-steps", type=int, default=2)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -54,6 +55,18 @@ def main() -> None:
     coord_target = torch.nn.functional.normalize(torch.randn(batch_size, 3, device=device), dim=-1)
 
     torch.set_grad_enabled(True)
+    for _ in range(args.warmup_steps):
+        optimizer.zero_grad(set_to_none=True)
+        warmup_out = model(sample)
+        warmup_loss = (
+            torch.nn.functional.cross_entropy(warmup_out["coarse_logits"], coarse_target)
+            + torch.nn.functional.cross_entropy(warmup_out["fine_logits"], fine_target)
+            + (1.0 - (warmup_out["coord_unit"] * coord_target).sum(dim=-1)).mean()
+        )
+        warmup_loss.backward()
+        optimizer.step()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(args.steps):
         optimizer.zero_grad(set_to_none=True)
@@ -65,15 +78,22 @@ def main() -> None:
         )
         loss.backward()
         optimizer.step()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
     metrics = {
         "device": str(device),
         "steps": args.steps,
+        "warmup_steps": args.warmup_steps,
         "batch_size": batch_size,
         "image_size": image_size,
+        "num_experts": int(config["model"].get("num_experts", 4)),
+        "posterior_components": int(config["model"].get("posterior_components", 8)),
         "avg_step_ms": (elapsed / args.steps) * 1000.0,
         "samples_per_sec": (batch_size * args.steps) / max(elapsed, 1e-6),
     }
+    if device.type == "cuda":
+        metrics["max_memory_mb"] = round(torch.cuda.max_memory_allocated(device) / (1024**2), 2)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2, sort_keys=True)
     print(json.dumps(metrics, indent=2, sort_keys=True))
