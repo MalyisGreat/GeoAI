@@ -12,7 +12,11 @@ def _purge_package(package_name: str) -> None:
             sys.modules.pop(module_name, None)
 
 
-def bootstrap_project_src(project_root: Path, package_name: str = "geobot") -> Path:
+def bootstrap_project_src(
+    project_root: Path,
+    package_name: str = "geobot",
+    required_subpackages: tuple[str, ...] = ("data", "train", "utils"),
+) -> Path:
     project_root = project_root.resolve()
     src_root = (project_root / "src").resolve()
     package_root = (src_root / package_name).resolve()
@@ -41,6 +45,9 @@ def bootstrap_project_src(project_root: Path, package_name: str = "geobot") -> P
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Cannot create import spec for {package_name!r} from {init_path}")
         module = importlib.util.module_from_spec(spec)
+        module.__file__ = str(init_path)
+        module.__package__ = package_name
+        module.__path__ = [str(package_root)]
         sys.modules[package_name] = module
         spec.loader.exec_module(module)
 
@@ -48,4 +55,9 @@ def bootstrap_project_src(project_root: Path, package_name: str = "geobot") -> P
     imported_file = getattr(imported, "__file__", None)
     if imported_file is None or Path(imported_file).resolve() != init_path.resolve():
         raise RuntimeError(f"Failed to resolve local {package_name!r} package from {init_path}")
+    imported_path = [Path(entry).resolve() for entry in getattr(imported, "__path__", [])]
+    if package_root.resolve() not in imported_path:
+        imported.__path__ = [str(package_root)]
+    for subpackage in required_subpackages:
+        importlib.import_module(f"{package_name}.{subpackage}")
     return src_root
