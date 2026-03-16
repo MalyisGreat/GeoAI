@@ -12,10 +12,29 @@ def _purge_package(package_name: str) -> None:
             sys.modules.pop(module_name, None)
 
 
+def _load_package_from_init(module_name: str, package_root: Path) -> None:
+    init_path = (package_root / "__init__.py").resolve()
+    if not init_path.exists():
+        raise RuntimeError(f"Cannot bootstrap {module_name!r}: missing {init_path}")
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        init_path,
+        submodule_search_locations=[str(package_root.resolve())],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot create import spec for {module_name!r} from {init_path}")
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(init_path)
+    module.__package__ = module_name
+    module.__path__ = [str(package_root.resolve())]
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+
 def bootstrap_project_src(
     project_root: Path,
     package_name: str = "geobot",
-    required_subpackages: tuple[str, ...] = ("data", "train", "utils"),
+    required_subpackages: tuple[str, ...] = ("data", "eval", "model", "train", "utils"),
 ) -> Path:
     project_root = project_root.resolve()
     src_root = (project_root / "src").resolve()
@@ -37,19 +56,7 @@ def bootstrap_project_src(
     if loaded_path != init_path.resolve():
         _purge_package(package_name)
         importlib.invalidate_caches()
-        spec = importlib.util.spec_from_file_location(
-            package_name,
-            init_path,
-            submodule_search_locations=[str(package_root)],
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Cannot create import spec for {package_name!r} from {init_path}")
-        module = importlib.util.module_from_spec(spec)
-        module.__file__ = str(init_path)
-        module.__package__ = package_name
-        module.__path__ = [str(package_root)]
-        sys.modules[package_name] = module
-        spec.loader.exec_module(module)
+        _load_package_from_init(package_name, package_root)
 
     imported = sys.modules.get(package_name)
     imported_file = getattr(imported, "__file__", None)
@@ -59,5 +66,5 @@ def bootstrap_project_src(
     if package_root.resolve() not in imported_path:
         imported.__path__ = [str(package_root)]
     for subpackage in required_subpackages:
-        importlib.import_module(f"{package_name}.{subpackage}")
+        _load_package_from_init(f"{package_name}.{subpackage}", package_root / subpackage)
     return src_root
