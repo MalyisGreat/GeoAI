@@ -54,10 +54,23 @@ def _maybe_sample(frame: pd.DataFrame, limit: int | None, seed: int) -> pd.DataF
     return frame.sample(n=limit, random_state=seed).reset_index(drop=True)
 
 
+def _filter_available_rows(frame: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+    if not bool(config["data"].get("require_archive_rows", False)):
+        return frame
+    if "archive_path" not in frame.columns:
+        raise ValueError("Config requires archive-backed rows, but the manifest has no archive_path column.")
+    filtered = frame[frame["archive_path"].notna()].reset_index(drop=True)
+    if filtered.empty:
+        raise ValueError("No archive-backed rows are available in the manifest for training.")
+    return filtered
+
+
 def _prepare_frames(config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, Any]:
     train_frame = load_frame(config["data"]["train_manifest"])
+    train_frame = _filter_available_rows(train_frame, config)
     if config["data"].get("val_manifest"):
         val_frame = load_frame(config["data"]["val_manifest"])
+        val_frame = _filter_available_rows(val_frame, config)
     else:
         train_frame, val_frame = split_train_val(
             train_frame,
@@ -68,6 +81,15 @@ def _prepare_frames(config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame,
     val_frame = _maybe_sample(val_frame, config["data"].get("max_val_rows"), config["seed"])
     train_frame, val_frame, label_maps = attach_label_indices(train_frame, val_frame)
     return train_frame, val_frame, label_maps
+
+
+def _console_enabled(config: dict[str, Any]) -> bool:
+    return bool(config["train"].get("console_log", False))
+
+
+def _console_print(config: dict[str, Any], message: str) -> None:
+    if _console_enabled(config):
+        print(message, flush=True)
 
 
 def _make_loaders(
@@ -87,6 +109,7 @@ def _make_loaders(
             shuffle_buffer_size=int(config["train"].get("shuffle_buffer_size", 2048)),
             shuffle_archives=bool(config["train"].get("shuffle_archives", True)),
             seed=int(config["seed"]),
+            worker_sharding_mode=str(config["train"].get("worker_sharding_mode", "auto")),
         )
     else:
         train_ds = GeoDataset(train_frame, image_root=image_root, image_size=image_size, augment=True)
@@ -313,6 +336,16 @@ def _train_one_epoch(
     start_time = time.perf_counter()
     epoch_log_path = Path(config["train"].get("_train_step_log_path", ""))
     last_step_end = start_time
+    console_log_every = int(
+        config["train"].get(
+            "console_log_every_steps",
+            config["train"].get("log_every_steps", 20),
+        )
+    )
+    try:
+        total_steps = len(loader)
+    except TypeError:
+        total_steps = None
 
     for step, batch in enumerate(loader, start=1):
         batch_ready_time = time.perf_counter()
@@ -352,18 +385,32 @@ def _train_one_epoch(
         step_end = time.perf_counter()
         compute_seconds = step_end - compute_start
         total_step_seconds = step_end - batch_ready_time
+        step_payload = {
+            "epoch": int(config["train"].get("_current_epoch", 0)),
+            "step": step,
+            "loss": components["loss"],
+            "data_wait_seconds": data_wait_seconds,
+            "compute_seconds": compute_seconds,
+            "step_seconds": total_step_seconds,
+            "step_samples_per_sec": batch["image"].shape[0] / max(total_step_seconds, 1e-6),
+        }
         if epoch_log_path and step % int(config["train"].get("log_every_steps", 20)) == 0:
-            log_event(
-                epoch_log_path,
-                {
-                    "epoch": int(config["train"].get("_current_epoch", 0)),
-                    "step": step,
-                    "loss": components["loss"],
-                    "data_wait_seconds": data_wait_seconds,
-                    "compute_seconds": compute_seconds,
-                    "step_seconds": total_step_seconds,
-                    "step_samples_per_sec": batch["image"].shape[0] / max(total_step_seconds, 1e-6),
-                },
+            log_event(epoch_log_path, step_payload)
+        if _console_enabled(config) and step % max(1, console_log_every) == 0:
+            step_label = f"{step}/{total_steps}" if total_steps is not None else str(step)
+            gpu_memory_mb = ""
+            if device.type == "cuda":
+                gpu_memory_mb = (
+                    f" gpu_mem_mb={torch.cuda.max_memory_allocated(device) / (1024 ** 2):.0f}"
+                )
+            _console_print(
+                config,
+                (
+                    f"[train] epoch={step_payload['epoch']} step={step_label} "
+                    f"loss={step_payload['loss']:.4f} sps={step_payload['step_samples_per_sec']:.1f} "
+                    f"wait={step_payload['data_wait_seconds']:.3f}s "
+                    f"compute={step_payload['compute_seconds']:.3f}s{gpu_memory_mb}"
+                ),
             )
         last_step_end = step_end
 
@@ -427,12 +474,16 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
     train_ds, val_ds, train_loader, val_loader = _make_loaders(train_frame, val_frame, config)
     loader_seconds = time.perf_counter() - loader_started
     model_started = time.perf_counter()
-    categorical_heads = config["model"].get("auxiliary_categorical_heads") or list(
-        label_maps.aux_categorical.keys()
-    )
-    numeric_heads = config["model"].get("auxiliary_numeric_heads") or list(
-        label_maps.aux_numeric_stats.keys()
-    )
+    categorical_head_config = config["model"].get("auxiliary_categorical_heads")
+    if categorical_head_config is None:
+        categorical_heads = list(label_maps.aux_categorical.keys())
+    else:
+        categorical_heads = list(categorical_head_config)
+    numeric_head_config = config["model"].get("auxiliary_numeric_heads")
+    if numeric_head_config is None:
+        numeric_heads = list(label_maps.aux_numeric_stats.keys())
+    else:
+        numeric_heads = list(numeric_head_config)
     model = GeoLocator(
         backbone_name=config["model"]["backbone"],
         fallback_backbone=config["model"]["fallback_backbone"],
@@ -489,14 +540,37 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
             "num_val_rows": len(val_frame),
         },
     )
+    _console_print(
+        config,
+        (
+            f"[startup] device={device} train_rows={len(train_frame)} val_rows={len(val_frame)} "
+            f"batch={config['train']['batch_size']} val_batch={config['train']['val_batch_size']} "
+            f"workers={config['train'].get('num_workers', 0)} "
+            f"streaming={bool(config['train'].get('use_streaming_train_dataset', False))} "
+            f"worker_sharding={config['train'].get('worker_sharding_mode', 'auto')} "
+            f"prepare_s={prepare_seconds:.2f} loader_s={loader_seconds:.2f} model_s={model_init_seconds:.2f}"
+        ),
+    )
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         config["train"]["_current_epoch"] = epoch
         config["train"]["_train_step_log_path"] = str(step_log)
+        _console_print(config, f"[epoch-start] epoch={epoch}/{int(config['train']['epochs'])}")
         train_metrics = _train_one_epoch(model, train_loader, optimizer, device=device, config=config)
         train_metrics["epoch"] = epoch
         log_event(train_log, train_metrics)
+        _console_print(
+            config,
+            (
+                f"[train-epoch] epoch={epoch} loss={train_metrics['loss']:.4f} "
+                f"coarse={train_metrics['coarse_loss']:.4f} fine={train_metrics['fine_loss']:.4f} "
+                f"retrieval={train_metrics['retrieval_loss']:.4f} "
+                f"sps={train_metrics['samples_per_sec']:.1f} seconds={train_metrics['epoch_seconds']:.1f}"
+            ),
+        )
 
+        eval_started = time.perf_counter()
+        _console_print(config, f"[eval-start] epoch={epoch}")
         eval_metrics = _evaluate(
             model,
             train_ds,
@@ -506,8 +580,17 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
             device=device,
             config=config,
         )
+        eval_metrics["eval_seconds"] = time.perf_counter() - eval_started
         eval_metrics["epoch"] = epoch
         log_event(val_log, eval_metrics)
+        _console_print(
+            config,
+            (
+                f"[eval-epoch] epoch={epoch} median_km={eval_metrics['median_km']:.1f} "
+                f"mean_km={eval_metrics['mean_km']:.1f} within_2500km={eval_metrics.get('within_2500km', 0.0):.4f} "
+                f"coarse_top1={eval_metrics['coarse_top1']:.4f} seconds={eval_metrics['eval_seconds']:.1f}"
+            ),
+        )
         scheduler.step()
 
         if eval_metrics["median_km"] < best_metric:
@@ -521,6 +604,10 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
                 metrics=eval_metrics,
                 label_maps=label_maps,
                 cell_centers=cell_store.centers,
+            )
+            _console_print(
+                config,
+                f"[checkpoint] epoch={epoch} best_median_km={best_metric:.1f} path={best_checkpoint}",
             )
 
     summary = {

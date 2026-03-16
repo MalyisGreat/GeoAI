@@ -1,13 +1,16 @@
 .codex/
 .pytest_cache/
 .tmp_osv5m_repo/
+.venv*/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 .DS_Store
 Thumbs.db
 data/
 runs/
 logs/
 benchmarks/latest-metrics.json
+benchmarks/local-loader-benchmark.json

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ def save_summary(path: str | Path, payload: dict[str, Any]) -> None:
 
 def system_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {
-        "python": shutil.which("python"),
+        "python": sys.executable,
         "nvidia_smi": None,
     }
     if shutil.which("nvidia-smi"):
