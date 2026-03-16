@@ -1,0 +1,8 @@
+{
+  "avg_step_ms": 330.4846999963047,
+  "batch_size": 4,
+  "device": "cpu",
+  "image_size": 160,
+  "samples_per_sec": 12.10343474310528,
+  "steps": 8
+}

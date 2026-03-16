@@ -1,0 +1,12 @@
+.codex/
+.pytest_cache/
+.tmp_osv5m_repo/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+data/
+runs/
+logs/
