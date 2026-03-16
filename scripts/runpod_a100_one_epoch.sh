@@ -7,11 +7,14 @@ cd "$ROOT_DIR"
 export PYTHONUNBUFFERED=1
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_HUB_ENABLE_HF_TRANSFER=1
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
+export TOKENIZERS_PARALLELISM=false
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_DIR="${ROOT_DIR}/logs/runpod-a100/${RUN_STAMP}"
 CONFIG_PATH="${CONFIG_PATH:-configs/runpod_a100_vitl_1epoch.yaml}"
-MAX_WORKERS="${MAX_WORKERS:-48}"
+MAX_WORKERS="${MAX_WORKERS:-64}"
 mkdir -p "${LOG_DIR}"
 
 python -m pip install --upgrade pip
@@ -26,9 +29,13 @@ python scripts/a100_parallel_download.py \
   2>&1 | tee "${LOG_DIR}/download-console.log"
 
 echo "[${RUN_STAMP}] starting one-epoch training"
+echo "[${RUN_STAMP}] config=${CONFIG_PATH} max_workers=${MAX_WORKERS} omp=${OMP_NUM_THREADS}"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi | tee "${LOG_DIR}/nvidia-smi-before.log"
+fi
 python scripts/train.py --config "${CONFIG_PATH}" \
   2>&1 | tee "${LOG_DIR}/train-console.log"
 
 echo "[${RUN_STAMP}] finished"
-echo "Structured metrics: ${ROOT_DIR}/runs/atlasmoe-a100-runpod-1epoch"
+echo "Structured metrics: ${ROOT_DIR}/runs/atlasmoe-a100-runpod-1epoch-max"
 echo "Console logs: ${LOG_DIR}"
