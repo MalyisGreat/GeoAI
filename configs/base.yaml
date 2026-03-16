@@ -60,6 +60,9 @@ train:
   num_workers: 8
   prefetch_factor: 2
   drop_last: true
+  use_streaming_train_dataset: true
+  shuffle_buffer_size: 2048
+  shuffle_archives: true
   amp: bf16
   compile: true
   compile_mode: reduce-overhead

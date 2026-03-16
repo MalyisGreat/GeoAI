@@ -111,7 +111,8 @@ def build_zip_member_index(
         futures = {executor.submit(_index_archive, archive_path): archive_path for archive_path in archives}
         for future in as_completed(futures):
             rows.extend(future.result())
-    frame = pd.DataFrame(rows).drop_duplicates(subset=["filename"], keep="first")
+    frame = pd.DataFrame(rows, columns=["filename", "member_name", "archive_path"])
+    frame = frame.drop_duplicates(subset=["filename"], keep="first")
     save_manifest(frame, output_path)
     return output_path
 

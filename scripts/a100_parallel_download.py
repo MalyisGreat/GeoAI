@@ -31,6 +31,42 @@ def configure_fast_hf() -> dict[str, str]:
     return env_updates
 
 
+def human_bytes(value: int) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(value)
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{value} B"
+
+
+def summarize_dry_run(dry_run_result: list[object]) -> dict[str, int]:
+    total_bytes = 0
+    download_bytes = 0
+    cached_bytes = 0
+    planned_files = len(dry_run_result)
+    download_files = 0
+    cached_files = 0
+    for item in dry_run_result:
+        file_size = int(getattr(item, "file_size", 0) or 0)
+        total_bytes += file_size
+        if bool(getattr(item, "will_download", False)):
+            download_bytes += file_size
+            download_files += 1
+        else:
+            cached_bytes += file_size
+            cached_files += 1
+    return {
+        "planned_files": planned_files,
+        "download_files": download_files,
+        "cached_files": cached_files,
+        "planned_bytes": total_bytes,
+        "download_bytes": download_bytes,
+        "cached_bytes": cached_bytes,
+    }
+
+
 def build_allow_patterns(provider: OSV5MProvider, splits: list[str], limit_shards: int | None, metadata_only: bool) -> list[str]:
     patterns = ["README.md"]
     for split in splits:
@@ -67,6 +103,16 @@ def main() -> None:
     max_workers = args.max_workers or int(config["download"].get("snapshot_max_workers", 16))
     allow_patterns = build_allow_patterns(provider, args.splits, args.limit_shards, args.metadata_only)
 
+    dry_run_result = snapshot_download(
+        repo_id="osv5m/osv5m",
+        repo_type="dataset",
+        local_dir=provider.raw_root,
+        allow_patterns=allow_patterns,
+        max_workers=max_workers,
+        dry_run=True,
+    )
+    size_summary = summarize_dry_run(dry_run_result)
+
     plan = {
         "event": "sync-plan",
         "repo_id": "osv5m/osv5m",
@@ -77,33 +123,49 @@ def main() -> None:
         "metadata_only": args.metadata_only,
         "dry_run": args.dry_run,
         "env": env_updates,
+        **size_summary,
+        "planned_bytes_human": human_bytes(size_summary["planned_bytes"]),
+        "download_bytes_human": human_bytes(size_summary["download_bytes"]),
+        "cached_bytes_human": human_bytes(size_summary["cached_bytes"]),
     }
     print(json.dumps(plan, indent=2, sort_keys=True))
     log_event(log_path, plan)
 
-    started = time.perf_counter()
-    dry_run_result = snapshot_download(
-        repo_id="osv5m/osv5m",
-        repo_type="dataset",
-        local_dir=provider.raw_root,
-        allow_patterns=allow_patterns,
-        max_workers=max_workers,
-        dry_run=args.dry_run,
-    )
     if args.dry_run:
         final = {
             "event": "dry-run-finished",
-            "planned_files": len(dry_run_result),
+            **size_summary,
+            "planned_bytes_human": human_bytes(size_summary["planned_bytes"]),
+            "download_bytes_human": human_bytes(size_summary["download_bytes"]),
+            "cached_bytes_human": human_bytes(size_summary["cached_bytes"]),
             "log_path": str(log_path),
         }
         log_event(log_path, final)
         print(json.dumps(final, indent=2, sort_keys=True))
         return
+    started = time.perf_counter()
+    snapshot_download(
+        repo_id="osv5m/osv5m",
+        repo_type="dataset",
+        local_dir=provider.raw_root,
+        allow_patterns=allow_patterns,
+        max_workers=max_workers,
+        dry_run=False,
+    )
+    download_seconds = time.perf_counter() - started
     log_event(
         log_path,
         {
             "event": "snapshot-complete",
-            "seconds": round(time.perf_counter() - started, 3),
+            "seconds": round(download_seconds, 3),
+            "download_bytes_estimate": size_summary["download_bytes"],
+            "download_bytes_estimate_human": human_bytes(size_summary["download_bytes"]),
+            "effective_mib_per_sec": round(
+                (size_summary["download_bytes"] / (1024 * 1024)) / download_seconds,
+                2,
+            )
+            if download_seconds > 0
+            else None,
             "local_dir": str(provider.raw_root),
         },
     )

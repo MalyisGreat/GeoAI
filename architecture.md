@@ -133,3 +133,4 @@
 
 - 2026-03-16 | Created initial architecture plan | New project kickoff
 - 2026-03-16 | Rebased architecture onto AtlasMoE-style training and zip-streamed data access | Stronger base model and faster H100 startup
+- 2026-03-16 | Enabled sequential shard streaming for train batches and byte-level sync telemetry | Higher end-to-end throughput and clearer download planning

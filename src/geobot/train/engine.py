@@ -11,9 +11,9 @@ import pandas as pd
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
-from geobot.data import GeoDataset, attach_label_indices, load_frame, split_train_val
+from geobot.data import GeoDataset, StreamingGeoDataset, attach_label_indices, load_frame, split_train_val
 from geobot.eval import GalleryIndex, build_cell_state_store, rerank_candidate_cells, summarize_errors
 from geobot.model import GeoLocator
 from geobot.utils.geo import haversine_km, tensor_unit_to_latlon
@@ -74,10 +74,22 @@ def _make_loaders(
     train_frame: pd.DataFrame,
     val_frame: pd.DataFrame,
     config: dict[str, Any],
-) -> tuple[GeoDataset, GeoDataset, DataLoader, DataLoader]:
+) -> tuple[Dataset, GeoDataset, DataLoader, DataLoader]:
     image_root = config["data"]["image_root"]
     image_size = int(config["model"]["image_size"])
-    train_ds = GeoDataset(train_frame, image_root=image_root, image_size=image_size, augment=True)
+    use_streaming_train = bool(config["train"].get("use_streaming_train_dataset", False))
+    if use_streaming_train and "archive_path" in train_frame.columns and train_frame["archive_path"].notna().any():
+        train_ds = StreamingGeoDataset(
+            train_frame,
+            image_root=image_root,
+            image_size=image_size,
+            augment=True,
+            shuffle_buffer_size=int(config["train"].get("shuffle_buffer_size", 2048)),
+            shuffle_archives=bool(config["train"].get("shuffle_archives", True)),
+            seed=int(config["seed"]),
+        )
+    else:
+        train_ds = GeoDataset(train_frame, image_root=image_root, image_size=image_size, augment=True)
     val_ds = GeoDataset(val_frame, image_root=image_root, image_size=image_size, augment=False)
     num_workers = int(config["train"].get("num_workers", 0))
     loader_kwargs = {
@@ -90,7 +102,7 @@ def _make_loaders(
     train_loader = DataLoader(
         train_ds,
         batch_size=int(config["train"]["batch_size"]),
-        shuffle=True,
+        shuffle=not isinstance(train_ds, StreamingGeoDataset),
         drop_last=bool(config["train"].get("drop_last", False)),
         **loader_kwargs,
     )
@@ -524,6 +536,7 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         "prepare_seconds": prepare_seconds,
         "loader_seconds": loader_seconds,
         "model_init_seconds": model_init_seconds,
+        "use_streaming_train_dataset": bool(config["train"].get("use_streaming_train_dataset", False)),
     }
     save_summary(run_dirs["root"] / "summary.json", summary)
     return summary

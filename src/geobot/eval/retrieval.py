@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, IterableDataset, Subset
 
 from geobot.data.dataset import LabelMaps
 from geobot.utils.geo import latlon_to_unit, normalize_unit_tensor
@@ -82,20 +82,32 @@ class GalleryIndex:
         num_workers: int,
         max_items: int | None = None,
     ) -> "GalleryIndex":
-        if max_items is not None and len(dataset) > max_items:
+        if max_items is not None and not isinstance(dataset, IterableDataset) and len(dataset) > max_items:
             dataset = Subset(dataset, range(max_items))
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         embeddings: list[torch.Tensor] = []
         coord_units: list[torch.Tensor] = []
         coarse_idx: list[torch.Tensor] = []
+        seen_items = 0
         model.eval()
         with torch.no_grad():
             for batch in loader:
+                if max_items is not None and seen_items >= max_items:
+                    break
                 images = batch["image"].to(device)
                 outputs = model(images)
-                embeddings.append(outputs.get("retrieval_embedding", outputs["embedding"]).cpu())
-                coord_units.append(batch["coord_unit"].cpu())
-                coarse_idx.append(batch["coarse_idx"].cpu())
+                batch_embeddings = outputs.get("retrieval_embedding", outputs["embedding"]).cpu()
+                batch_coord_units = batch["coord_unit"].cpu()
+                batch_coarse_idx = batch["coarse_idx"].cpu()
+                if max_items is not None and seen_items + len(batch_embeddings) > max_items:
+                    keep = max_items - seen_items
+                    batch_embeddings = batch_embeddings[:keep]
+                    batch_coord_units = batch_coord_units[:keep]
+                    batch_coarse_idx = batch_coarse_idx[:keep]
+                embeddings.append(batch_embeddings)
+                coord_units.append(batch_coord_units)
+                coarse_idx.append(batch_coarse_idx)
+                seen_items += len(batch_embeddings)
         return cls(
             embeddings=torch.cat(embeddings, dim=0),
             coord_units=torch.cat(coord_units, dim=0),
