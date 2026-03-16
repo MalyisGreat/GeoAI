@@ -10,3 +10,4 @@ Thumbs.db
 data/
 runs/
 logs/
+benchmarks/latest-metrics.json
