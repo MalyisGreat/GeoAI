@@ -43,6 +43,9 @@ def main() -> None:
         dropout=float(config["model"]["dropout"]),
         num_coarse_classes=32,
         num_fine_classes=128,
+        num_experts=int(config["model"].get("num_experts", 4)),
+        posterior_components=int(config["model"].get("posterior_components", 8)),
+        retrieval_temperature=float(config["model"].get("retrieval_temperature", 0.07)),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     sample = torch.randn(batch_size, 3, image_size, image_size, device=device)

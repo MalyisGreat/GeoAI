@@ -6,7 +6,7 @@
 - Date started: 2026-03-16
 - Owner: Josh + Codex
 - Status: active
-- Scope: Build an open-data visual geolocation training and inference stack that can scale to A100 training while remaining locally smoke-testable on the current Windows laptop.
+- Scope: Build an open-data visual geolocation training and inference stack that uses explicit clue supervision, region-specialist experts, probabilistic globe modeling, candidate reranking, and fast shard-streamed data access while remaining locally smoke-testable on the current Windows laptop.
 
 ## Vision and Context
 
@@ -14,7 +14,7 @@
 - In-scope:
   - public dataset downloaders
   - manifest generation
-  - hierarchical geolocation model
+  - AtlasMoE-style hybrid geolocation model
   - training, evaluation, retrieval reranking, and benchmarking
   - structured metrics and smoke tests
 - Out-of-scope:
@@ -34,7 +34,7 @@
 
 - Components and boundaries:
   - `src/geobot/data`: dataset providers, downloaders, manifest builders, dataset objects
-  - `src/geobot/model`: backbone selection and hybrid geolocation head
+  - `src/geobot/model`: backbone selection, geocell router, region experts, clue heads, probabilistic globe head, and retrieval head
   - `src/geobot/train`: training loop, checkpointing, and evaluation orchestration
   - `src/geobot/eval`: retrieval reranking and metric aggregation
   - `src/geobot/utils`: configuration, geo math, logging, and IO helpers
@@ -46,7 +46,7 @@
   - model code never reaches out to the network
   - training code owns optimization, metrics, checkpoints, and resource snapshots
 - Data flow:
-  - public dataset -> local raw files -> normalized manifest -> dataset loader -> model -> checkpoint + metrics -> retrieval gallery -> evaluation report
+  - public dataset -> local raw files or zip shards -> normalized manifest -> zip member index -> dataset loader -> router + experts + clue heads + probabilistic head -> checkpoint + metrics -> retrieval + clue-aware reranking -> evaluation report
 - External dependencies:
   - Hugging Face static dataset files for `OSV-5M`
   - Geograph static sample zip
@@ -58,9 +58,9 @@
 - Language/framework stack: Python, PyTorch, pandas, YAML config, pytest
 - Core interfaces:
   - provider classes expose `prepare(...)`
-  - manifests are parquet or CSV with normalized columns
-  - model forward returns embeddings, geocell logits, and coordinate vectors
-  - evaluation consumes model outputs plus gallery embeddings
+  - manifests are parquet or CSV with normalized image paths plus clue metadata
+  - model forward returns routed embeddings, probabilistic location parameters, clue predictions, and retrieval logits
+  - evaluation consumes model outputs plus gallery embeddings and per-cell clue priors
 - Persistence/storage model:
   - raw downloads under `data/<provider>/raw`
   - manifests under `data/<provider>/manifests`
@@ -71,7 +71,7 @@
   - metrics are append-only JSONL plus a summary JSON
 - Deployment topology:
   - local smoke: single-process CPU or small GPU
-  - full training: single-node A100 with larger batch size, BF16, and optional compiled model path
+  - full training: single-node H100/A100 with larger batch size, BF16, zip-streamed shards, and optional compiled model path
 - Non-functional requirements (availability, latency, scale, cost):
   - smoke verification under a few minutes
   - A100 path should support large batches with mixed precision
@@ -92,10 +92,10 @@
 - Decision ID: ADR-002
 - Date: 2026-03-16
 - Owner: Codex
-- Decision: Use a hybrid head combining coarse/fine classification, regression, and retrieval reranking.
-- Rationale: Geolocation benefits from both memorization and smooth coordinate prediction; this structure keeps both.
+- Decision: Use an AtlasMoE-style base stack combining a coarse router, region-specialist experts, explicit clue heads, a probabilistic globe head, retrieval scoring, and clue-aware candidate reranking.
+- Rationale: This keeps ambiguity explicit, routes hard cases to specialists, and makes subtle cues trainable instead of hoping a single head absorbs them.
 - Alternatives considered: pure classification, pure regression, direct nearest-neighbor only
-- Risks: more moving parts and more metrics to track.
+- Risks: more moving parts, more auxiliary labels, and more tuning knobs.
 - Status: active
 
 - Decision ID: ADR-003
@@ -105,6 +105,15 @@
 - Rationale: the current machine has CPU-only PyTorch, so smoke runs must not depend on heavyweight optional installs.
 - Alternatives considered: forcing `timm`, forcing torchvision, writing a single tiny-only model
 - Risks: smoke accuracy is not representative of the A100 target path.
+- Status: active
+
+- Decision ID: ADR-004
+- Date: 2026-03-16
+- Owner: Codex
+- Decision: Prefer shard streaming and zip indexing over eager extraction for full-scale OSV-5M training.
+- Rationale: Fast sync plus direct zip reads cuts startup time and peak disk use, which matters more than perfect raw-file convenience on H100-class runs.
+- Alternatives considered: full eager extraction, per-image HTTP fetches
+- Risks: first-run zip indexing adds some up-front latency and the loader depends on archive integrity.
 - Status: active
 
 ## Update Cadence
@@ -123,3 +132,4 @@
 ## Change History
 
 - 2026-03-16 | Created initial architecture plan | New project kickoff
+- 2026-03-16 | Rebased architecture onto AtlasMoE-style training and zip-streamed data access | Stronger base model and faster H100 startup

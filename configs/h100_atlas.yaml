@@ -1,4 +1,4 @@
-experiment_name: geo-superhuman-a100
+experiment_name: atlasmoe-h100
 seed: 42
 
 data:
@@ -7,7 +7,7 @@ data:
   train_manifest: data/osv5m/manifests/train.parquet
   val_manifest: null
   image_root: data/osv5m/raw
-  val_fraction: 0.1
+  val_fraction: 0.05
   coarse_bins:
     - 18
     - 36
@@ -15,17 +15,17 @@ data:
     - 72
     - 144
   max_train_rows: null
-  max_val_rows: 50000
+  max_val_rows: 100000
 
 download:
   backend: snapshot
   osv5m_metadata_base: https://huggingface.co/datasets/osv5m/osv5m/resolve/main
   osv5m_tree_base: https://huggingface.co/datasets/osv5m/osv5m/tree/main
   geograph_sample_url: https://s3.eu-west-1.amazonaws.com/data.geograph.org.uk/datasets/geograph_dataset001-sample.zip
-  chunk_size_mb: 4
+  chunk_size_mb: 16
   extract_archives: false
   cleanup_archives: false
-  snapshot_max_workers: 16
+  snapshot_max_workers: 32
   index_archives: true
 
 model:
@@ -33,12 +33,12 @@ model:
   fallback_backbone: conv_geo_large
   pretrained: true
   image_size: 224
-  embedding_dim: 512
-  hidden_dim: 768
+  embedding_dim: 768
+  hidden_dim: 1024
   dropout: 0.1
-  num_experts: 4
-  posterior_components: 8
-  retrieval_temperature: 0.07
+  num_experts: 8
+  posterior_components: 16
+  retrieval_temperature: 0.05
   auxiliary_categorical_heads:
     - land_cover
     - climate
@@ -49,14 +49,14 @@ model:
     - dist_sea
 
 train:
-  epochs: 8
+  epochs: 4
   batch_size: 256
   val_batch_size: 512
-  learning_rate: 0.0003
+  learning_rate: 0.0002
   weight_decay: 0.0001
   accumulate_steps: 1
   grad_clip_norm: 1.0
-  num_workers: 8
+  num_workers: 24
   amp: bf16
   compile: true
   channels_last: true
@@ -67,10 +67,10 @@ train:
   label_smoothing: 0.05
   coarse_loss_weight: 0.35
   fine_loss_weight: 0.9
-  retrieval_loss_weight: 0.35
+  retrieval_loss_weight: 0.4
   regression_loss_weight: 0.65
-  distribution_loss_weight: 0.45
-  clue_loss_weight: 0.25
+  distribution_loss_weight: 0.5
+  clue_loss_weight: 0.3
 
 eval:
   thresholds_km:
@@ -80,13 +80,14 @@ eval:
     - 100
     - 750
     - 2500
-  retrieval_top_k: 8
+  retrieval_top_k: 16
   retrieval_blend: 0.65
-  retrieval_filter_coarse_top_k: 3
+  retrieval_filter_coarse_top_k: 4
   use_gallery_rerank: true
-  candidate_top_k: 16
-  candidate_retrieval_weight: 0.35
-  clue_rerank_weight: 0.2
+  max_gallery_items: 50000
+  candidate_top_k: 32
+  candidate_retrieval_weight: 0.4
+  clue_rerank_weight: 0.25
 
 runtime:
   device: auto

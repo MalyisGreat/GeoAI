@@ -14,7 +14,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from geobot.data import GeoDataset, attach_label_indices, load_frame, split_train_val
-from geobot.eval import GalleryIndex, build_cell_center_tensor, summarize_errors
+from geobot.eval import GalleryIndex, build_cell_state_store, rerank_candidate_cells, summarize_errors
 from geobot.model import GeoLocator
 from geobot.utils.geo import haversine_km, tensor_unit_to_latlon
 from geobot.utils.io import save_manifest
@@ -69,21 +69,22 @@ def _make_loaders(
     train_ds = GeoDataset(train_frame, image_root=image_root, image_size=image_size, augment=True)
     val_ds = GeoDataset(val_frame, image_root=image_root, image_size=image_size, augment=False)
     num_workers = int(config["train"].get("num_workers", 0))
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": bool(config["train"].get("pin_memory", False)),
+        "persistent_workers": num_workers > 0,
+    }
     train_loader = DataLoader(
         train_ds,
         batch_size=int(config["train"]["batch_size"]),
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=bool(config["train"].get("pin_memory", False)),
-        persistent_workers=num_workers > 0,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=int(config["train"]["val_batch_size"]),
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=bool(config["train"].get("pin_memory", False)),
-        persistent_workers=num_workers > 0,
+        **loader_kwargs,
     )
     return train_ds, val_ds, train_loader, val_loader
 
@@ -93,6 +94,33 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     for key, value in batch.items():
         moved[key] = value.to(device) if torch.is_tensor(value) else value
     return moved
+
+
+def _probabilistic_loss(outputs: dict[str, torch.Tensor], target_units: torch.Tensor) -> torch.Tensor:
+    logits = outputs["posterior_logits"]
+    means = outputs["posterior_means"]
+    kappa = outputs["posterior_kappa"]
+    similarity = (means * target_units.unsqueeze(1)).sum(dim=-1)
+    log_mix = F.log_softmax(logits, dim=-1)
+    log_prob = torch.logsumexp(log_mix + kappa * similarity, dim=-1)
+    return -log_prob.mean()
+
+
+def _clue_losses(outputs: dict[str, Any], batch: dict[str, Any]) -> torch.Tensor:
+    total = None
+    for name, logits in outputs.get("clue_logits", {}).items():
+        key = f"aux_{name}_idx"
+        if key in batch:
+            loss = F.cross_entropy(logits, batch[key])
+            total = loss if total is None else total + loss
+    for name, prediction in outputs.get("clue_numeric", {}).items():
+        key = f"aux_{name}_value"
+        if key in batch:
+            loss = F.mse_loss(prediction, batch[key])
+            total = loss if total is None else total + loss
+    if total is None:
+        return batch["coord_unit"].new_tensor(0.0)
+    return total
 
 
 def _compute_loss(
@@ -105,17 +133,28 @@ def _compute_loss(
     fine_loss = F.cross_entropy(
         outputs["fine_logits"], batch["fine_idx"], label_smoothing=label_smoothing
     )
+    retrieval_loss = F.cross_entropy(
+        outputs["retrieval_logits"], batch["fine_idx"], label_smoothing=label_smoothing
+    )
     regression_loss = (1.0 - (outputs["coord_unit"] * batch["coord_unit"]).sum(dim=-1)).mean()
+    distribution_loss = _probabilistic_loss(outputs, batch["coord_unit"])
+    clue_loss = _clue_losses(outputs, batch)
     total = (
-        float(config["train"]["coarse_loss_weight"]) * coarse_loss
-        + float(config["train"]["fine_loss_weight"]) * fine_loss
-        + float(config["train"]["regression_loss_weight"]) * regression_loss
+        float(config["train"].get("coarse_loss_weight", 0.35)) * coarse_loss
+        + float(config["train"].get("fine_loss_weight", 0.9)) * fine_loss
+        + float(config["train"].get("retrieval_loss_weight", 0.35)) * retrieval_loss
+        + float(config["train"].get("regression_loss_weight", 0.65)) * regression_loss
+        + float(config["train"].get("distribution_loss_weight", 0.45)) * distribution_loss
+        + float(config["train"].get("clue_loss_weight", 0.25)) * clue_loss
     )
     components = {
         "loss": float(total.detach().cpu()),
         "coarse_loss": float(coarse_loss.detach().cpu()),
         "fine_loss": float(fine_loss.detach().cpu()),
+        "retrieval_loss": float(retrieval_loss.detach().cpu()),
         "regression_loss": float(regression_loss.detach().cpu()),
+        "distribution_loss": float(distribution_loss.detach().cpu()),
+        "clue_loss": float(clue_loss.detach().cpu()),
     }
     return total, components
 
@@ -124,23 +163,31 @@ def _predict_units(
     outputs: dict[str, torch.Tensor],
     *,
     gallery: GalleryIndex | None,
-    cell_centers: torch.Tensor,
+    cell_store: Any,
     config: dict[str, Any],
 ) -> torch.Tensor:
+    candidate_units, _ = rerank_candidate_cells(
+        outputs,
+        cell_store,
+        candidate_top_k=int(config["eval"].get("candidate_top_k", config["eval"]["retrieval_top_k"])),
+        retrieval_weight=float(config["eval"].get("candidate_retrieval_weight", 0.35)),
+        clue_weight=float(config["eval"].get("clue_rerank_weight", 0.2)),
+    )
     regressed = outputs["coord_unit"]
     if gallery is not None:
-        return gallery.query(
-            outputs["embedding"],
+        retrieved = gallery.query(
+            outputs.get("retrieval_embedding", outputs["embedding"]),
             regressed,
             outputs["coarse_logits"],
             top_k=int(config["eval"]["retrieval_top_k"]),
             blend=float(config["eval"]["retrieval_blend"]),
             coarse_top_k=int(config["eval"]["retrieval_filter_coarse_top_k"]),
         )
-    fine_idx = outputs["fine_logits"].argmax(dim=-1)
-    cell_prior = cell_centers.to(regressed.device)[fine_idx]
-    blend = float(config["eval"]["retrieval_blend"])
-    return torch.nn.functional.normalize((1.0 - blend) * regressed + blend * cell_prior, dim=-1)
+        return torch.nn.functional.normalize(
+            0.4 * regressed + 0.25 * candidate_units + 0.35 * retrieved,
+            dim=-1,
+        )
+    return torch.nn.functional.normalize(0.6 * regressed + 0.4 * candidate_units, dim=-1)
 
 
 def _evaluate(
@@ -148,6 +195,7 @@ def _evaluate(
     train_ds: GeoDataset,
     val_loader: DataLoader,
     train_frame: pd.DataFrame,
+    label_maps: Any,
     *,
     device: torch.device,
     config: dict[str, Any],
@@ -163,8 +211,10 @@ def _evaluate(
             max_items=min(len(train_ds), int(config["eval"].get("max_gallery_items", 50000))),
         )
 
-    cell_centers = build_cell_center_tensor(
-        train_frame, num_fine_classes=int(train_frame["fine_idx"].max()) + 1
+    cell_store = build_cell_state_store(
+        train_frame,
+        label_maps,
+        num_fine_classes=int(train_frame["fine_idx"].max()) + 1,
     )
     coarse_correct = 0
     fine_correct = 0
@@ -176,7 +226,7 @@ def _evaluate(
         for batch in val_loader:
             batch = _move_batch(batch, device)
             outputs = model(batch["image"])
-            pred_units = _predict_units(outputs, gallery=gallery, cell_centers=cell_centers, config=config)
+            pred_units = _predict_units(outputs, gallery=gallery, cell_store=cell_store, config=config)
             pred_latlon = tensor_unit_to_latlon(pred_units).cpu().numpy()
             true_latlon = batch["latlon"].cpu().numpy()
             batch_errors = haversine_km(
@@ -223,7 +273,15 @@ def _train_one_epoch(
     accumulate_steps = max(1, int(config["train"].get("accumulate_steps", 1)))
 
     optimizer.zero_grad(set_to_none=True)
-    total_loss = 0.0
+    aggregates = {
+        "loss": 0.0,
+        "coarse_loss": 0.0,
+        "fine_loss": 0.0,
+        "retrieval_loss": 0.0,
+        "regression_loss": 0.0,
+        "distribution_loss": 0.0,
+        "clue_loss": 0.0,
+    }
     total_batches = 0
     total_images = 0
     start_time = time.perf_counter()
@@ -256,13 +314,14 @@ def _train_one_epoch(
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        total_loss += components["loss"]
+        for key, value in components.items():
+            aggregates[key] += value
         total_batches += 1
         total_images += int(batch["image"].shape[0])
 
     duration = max(1e-6, time.perf_counter() - start_time)
     return {
-        "loss": total_loss / max(total_batches, 1),
+        **{key: value / max(total_batches, 1) for key, value in aggregates.items()},
         "samples_per_sec": total_images / duration,
         "epoch_seconds": duration,
         "learning_rate": float(optimizer.param_groups[0]["lr"]),
@@ -288,6 +347,8 @@ def _save_checkpoint(
         "metrics": metrics,
         "coarse_to_idx": label_maps.coarse_to_idx,
         "fine_to_idx": label_maps.fine_to_idx,
+        "aux_categorical": label_maps.aux_categorical,
+        "aux_numeric_stats": label_maps.aux_numeric_stats,
         "cell_centers": cell_centers.cpu(),
     }
     torch.save(checkpoint, path)
@@ -305,11 +366,19 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
     train_frame, val_frame, label_maps = _prepare_frames(config)
     save_manifest(train_frame, run_dirs["artifacts"] / "train_manifest.parquet")
     save_manifest(val_frame, run_dirs["artifacts"] / "val_manifest.parquet")
-    cell_centers = build_cell_center_tensor(
-        train_frame, num_fine_classes=int(train_frame["fine_idx"].max()) + 1
+    cell_store = build_cell_state_store(
+        train_frame,
+        label_maps,
+        num_fine_classes=int(train_frame["fine_idx"].max()) + 1,
     )
 
     train_ds, val_ds, train_loader, val_loader = _make_loaders(train_frame, val_frame, config)
+    categorical_heads = config["model"].get("auxiliary_categorical_heads") or list(
+        label_maps.aux_categorical.keys()
+    )
+    numeric_heads = config["model"].get("auxiliary_numeric_heads") or list(
+        label_maps.aux_numeric_stats.keys()
+    )
     model = GeoLocator(
         backbone_name=config["model"]["backbone"],
         fallback_backbone=config["model"]["fallback_backbone"],
@@ -319,6 +388,15 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         dropout=float(config["model"]["dropout"]),
         num_coarse_classes=len(label_maps.coarse_to_idx),
         num_fine_classes=len(label_maps.fine_to_idx),
+        num_experts=int(config["model"].get("num_experts", 4)),
+        posterior_components=int(config["model"].get("posterior_components", 8)),
+        retrieval_temperature=float(config["model"].get("retrieval_temperature", 0.07)),
+        aux_head_dims={
+            name: len(label_maps.aux_categorical[name])
+            for name in categorical_heads
+            if name in label_maps.aux_categorical
+        },
+        numeric_head_names=[name for name in numeric_heads if name in label_maps.aux_numeric_stats],
     ).to(device)
 
     if bool(config["train"].get("compile", False)) and device.type == "cuda" and hasattr(torch, "compile"):
@@ -351,6 +429,7 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
             train_ds,
             val_loader,
             train_frame,
+            label_maps,
             device=device,
             config=config,
         )
@@ -368,7 +447,7 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
                 epoch=epoch,
                 metrics=eval_metrics,
                 label_maps=label_maps,
-                cell_centers=cell_centers,
+                cell_centers=cell_store.centers,
             )
 
     summary = {
@@ -379,6 +458,8 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         "best_median_km": best_metric,
         "best_checkpoint": str(best_checkpoint),
         "run_root": str(run_dirs["root"]),
+        "num_experts": int(config["model"].get("num_experts", 4)),
+        "posterior_components": int(config["model"].get("posterior_components", 8)),
     }
     save_summary(run_dirs["root"] / "summary.json", summary)
     return summary

@@ -9,21 +9,20 @@ The project is built around two data paths:
 
 ## Core model
 
-The default architecture is a hybrid geolocation model:
+The default architecture is now an AtlasMoE-style base stack:
 
-- image encoder backbone
-- coarse geocell classifier
-- fine geocell classifier
-- spherical coordinate regressor
-- gallery retrieval reranker that blends nearest-neighbor evidence with direct regression
-
-That mirrors what works well in open geolocation literature: classification narrows the region, regression sharpens the coordinate, retrieval adds memorization for high-confidence matches.
+- shared vision trunk
+- coarse geocell router
+- region-specialist mixture-of-experts
+- explicit clue heads for land cover, climate, soil, drive side, road index, and distance-to-sea proxy
+- probabilistic globe head with multi-hypothesis location output
+- retrieval head plus clue-aware candidate reranking
 
 ## Why this structure
 
-- It scales up to A100 training by enabling mixed precision, gradient accumulation, and optional `timm` backbones.
+- It scales up to H100/A100 training by enabling mixed precision, expert routing, probabilistic training losses, and optional `timm` backbones.
 - It still runs a full smoke loop on CPU or a small consumer GPU.
-- It keeps downloads legal and reproducible by using open datasets with direct HTTP access.
+- It keeps downloads legal and reproducible by using open datasets with direct shard sync and zip streaming.
 
 ## Quick start
 
@@ -58,14 +57,14 @@ Run a small benchmark:
 python benchmarks\run.py --config configs\smoke.yaml --output benchmarks\latest-metrics.json
 ```
 
-## A100 full run
+## H100 full run
 
-Use the A100 config and parallel downloader:
+Use the H100 AtlasMoE config and fast sync:
 
 ```bash
 python -m pip install -e ".[accelerated]"
-python scripts/a100_parallel_download.py --config configs/a100_full.yaml --max-workers 6 --log-dir logs/a100-download
-python scripts/train.py --config configs/a100_full.yaml
+python scripts/a100_parallel_download.py --config configs/h100_atlas.yaml --splits train --max-workers 32 --log-dir logs/h100-sync
+python scripts/train.py --config configs/h100_atlas.yaml
 ```
 
 Or run the Linux orchestrator script:
@@ -78,9 +77,9 @@ Useful logs:
 
 - `logs/a100/<timestamp>/download-console.log`
 - `logs/a100/<timestamp>/train-console.log`
-- `logs/a100/<timestamp>/download/download.jsonl`
-- `runs/geo-superhuman-a100-full/metrics/train.jsonl`
-- `runs/geo-superhuman-a100-full/metrics/val.jsonl`
+- `logs/a100/<timestamp>/download/sync.jsonl`
+- `runs/atlasmoe-h100/metrics/train.jsonl`
+- `runs/atlasmoe-h100/metrics/val.jsonl`
 
 ## Open data used
 

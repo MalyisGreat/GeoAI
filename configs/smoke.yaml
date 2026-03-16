@@ -31,6 +31,11 @@ model:
   embedding_dim: 128
   hidden_dim: 192
   dropout: 0.05
+  num_experts: 2
+  posterior_components: 4
+  retrieval_temperature: 0.1
+  auxiliary_categorical_heads: []
+  auxiliary_numeric_heads: []
 
 train:
   epochs: 3
@@ -51,7 +56,10 @@ train:
   label_smoothing: 0.0
   coarse_loss_weight: 0.35
   fine_loss_weight: 0.9
+  retrieval_loss_weight: 0.3
   regression_loss_weight: 0.65
+  distribution_loss_weight: 0.35
+  clue_loss_weight: 0.0
 
 eval:
   thresholds_km:
@@ -64,6 +72,9 @@ eval:
   retrieval_blend: 0.55
   retrieval_filter_coarse_top_k: 2
   use_gallery_rerank: true
+  candidate_top_k: 4
+  candidate_retrieval_weight: 0.25
+  clue_rerank_weight: 0.0
 
 runtime:
   device: auto

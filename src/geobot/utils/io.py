@@ -72,6 +72,34 @@ def extract_zip_file(zip_path: str | Path, destination: str | Path) -> None:
         archive.extractall(destination)
 
 
+def build_zip_member_index(
+    root: str | Path,
+    output_path: str | Path | None = None,
+) -> Path:
+    root = Path(root)
+    output_path = Path(output_path) if output_path is not None else root / "zip_member_index.parquet"
+    archives = sorted(root.rglob("*.zip"))
+    rows: list[dict[str, str]] = []
+    for archive_path in archives:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                suffix = Path(info.filename).suffix.lower()
+                if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    continue
+                rows.append(
+                    {
+                        "filename": Path(info.filename).name,
+                        "member_name": info.filename,
+                        "archive_path": str(archive_path.resolve()),
+                    }
+                )
+    frame = pd.DataFrame(rows).drop_duplicates(subset=["filename"], keep="first")
+    save_manifest(frame, output_path)
+    return output_path
+
+
 def load_manifest(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     if path.suffix.lower() == ".parquet":
