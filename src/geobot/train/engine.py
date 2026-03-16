@@ -4,7 +4,7 @@ import math
 import random
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -308,6 +308,8 @@ def _train_one_epoch(
     *,
     device: torch.device,
     config: dict[str, Any],
+    images_seen_before_epoch: int = 0,
+    step_callback: Callable[[dict[str, float]], None] | None = None,
 ) -> dict[str, float]:
     model.train()
     amp_mode = str(config["train"].get("amp", "none")).lower()
@@ -393,9 +395,13 @@ def _train_one_epoch(
             "compute_seconds": compute_seconds,
             "step_seconds": total_step_seconds,
             "step_samples_per_sec": batch["image"].shape[0] / max(total_step_seconds, 1e-6),
+            "images_seen": images_seen_before_epoch + total_images,
+            "epoch_images_seen": total_images,
         }
         if epoch_log_path and step % int(config["train"].get("log_every_steps", 20)) == 0:
             log_event(epoch_log_path, step_payload)
+        if step_callback is not None:
+            step_callback(step_payload)
         if _console_enabled(config) and step % max(1, console_log_every) == 0:
             step_label = f"{step}/{total_steps}" if total_steps is not None else str(step)
             gpu_memory_mb = ""
@@ -408,6 +414,7 @@ def _train_one_epoch(
                 (
                     f"[train] epoch={step_payload['epoch']} step={step_label} "
                     f"loss={step_payload['loss']:.4f} sps={step_payload['step_samples_per_sec']:.1f} "
+                    f"images={step_payload['images_seen']:.0f} "
                     f"wait={step_payload['data_wait_seconds']:.3f}s "
                     f"compute={step_payload['compute_seconds']:.3f}s{gpu_memory_mb}"
                 ),
@@ -420,6 +427,8 @@ def _train_one_epoch(
         "samples_per_sec": total_images / duration,
         "epoch_seconds": duration,
         "learning_rate": float(optimizer.param_groups[0]["lr"]),
+        "images_seen_epoch": total_images,
+        "num_batches": total_batches,
     }
 
 
@@ -530,6 +539,83 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
     train_log = run_dirs["metrics"] / "train.jsonl"
     val_log = run_dirs["metrics"] / "val.jsonl"
     step_log = run_dirs["metrics"] / "train_steps.jsonl"
+    checkpoint_every_images = int(config["train"].get("checkpoint_every_images", 0) or 0)
+    eval_every_images = int(config["train"].get("eval_every_images", 0) or 0)
+    images_seen_total = 0
+    last_eval_images_seen = 0
+    next_checkpoint_images = checkpoint_every_images if checkpoint_every_images > 0 else None
+    next_eval_images = eval_every_images if eval_every_images > 0 else None
+
+    def save_named_checkpoint(
+        *,
+        checkpoint_path: Path,
+        epoch: int,
+        images_seen: int,
+        metrics: dict[str, float],
+    ) -> None:
+        checkpoint_metrics = dict(metrics)
+        checkpoint_metrics["images_seen"] = float(images_seen)
+        _save_checkpoint(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            config=config,
+            epoch=epoch,
+            metrics=checkpoint_metrics,
+            label_maps=label_maps,
+            cell_centers=cell_store.centers,
+        )
+
+    def run_eval(
+        *,
+        epoch: int,
+        images_seen: int,
+        trigger: str,
+    ) -> dict[str, float]:
+        nonlocal best_metric, last_eval_images_seen
+        eval_started = time.perf_counter()
+        _console_print(config, f"[eval-start] epoch={epoch} trigger={trigger} images={images_seen}")
+        model_was_training = model.training
+        eval_metrics = _evaluate(
+            model,
+            train_ds,
+            val_loader,
+            train_frame,
+            label_maps,
+            device=device,
+            config=config,
+        )
+        if model_was_training:
+            model.train()
+        eval_metrics["eval_seconds"] = time.perf_counter() - eval_started
+        eval_metrics["epoch"] = epoch
+        eval_metrics["images_seen"] = float(images_seen)
+        eval_metrics["trigger"] = trigger
+        log_event(val_log, eval_metrics)
+        _console_print(
+            config,
+            (
+                f"[eval-epoch] epoch={epoch} trigger={trigger} images={images_seen} "
+                f"median_km={eval_metrics['median_km']:.1f} mean_km={eval_metrics['mean_km']:.1f} "
+                f"p90_km={eval_metrics['p90_km']:.1f} within_2500km={eval_metrics.get('within_2500km', 0.0):.4f} "
+                f"coarse_top1={eval_metrics['coarse_top1']:.4f} seconds={eval_metrics['eval_seconds']:.1f}"
+            ),
+        )
+        if eval_metrics["median_km"] < best_metric:
+            best_metric = eval_metrics["median_km"]
+            save_named_checkpoint(
+                checkpoint_path=best_checkpoint,
+                epoch=epoch,
+                images_seen=images_seen,
+                metrics=eval_metrics,
+            )
+            _console_print(
+                config,
+                f"[checkpoint] epoch={epoch} kind=best images={images_seen} best_median_km={best_metric:.1f} path={best_checkpoint}",
+            )
+        last_eval_images_seen = images_seen
+        return eval_metrics
+
     save_summary(
         run_dirs["artifacts"] / "startup.json",
         {
@@ -556,8 +642,49 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         config["train"]["_current_epoch"] = epoch
         config["train"]["_train_step_log_path"] = str(step_log)
         _console_print(config, f"[epoch-start] epoch={epoch}/{int(config['train']['epochs'])}")
-        train_metrics = _train_one_epoch(model, train_loader, optimizer, device=device, config=config)
+        epoch_images_before = images_seen_total
+
+        def on_step(step_payload: dict[str, float]) -> None:
+            nonlocal next_checkpoint_images, next_eval_images
+            current_images_seen = int(step_payload["images_seen"])
+            while next_checkpoint_images is not None and current_images_seen >= next_checkpoint_images:
+                checkpoint_path = (
+                    run_dirs["checkpoints"] / f"images_{current_images_seen:07d}.pt"
+                )
+                save_named_checkpoint(
+                    checkpoint_path=checkpoint_path,
+                    epoch=epoch,
+                    images_seen=current_images_seen,
+                    metrics={
+                        "loss": float(step_payload["loss"]),
+                        "trigger_images": float(next_checkpoint_images),
+                    },
+                )
+                _console_print(
+                    config,
+                    f"[checkpoint] epoch={epoch} kind=periodic images={current_images_seen} path={checkpoint_path}",
+                )
+                next_checkpoint_images += checkpoint_every_images
+            while next_eval_images is not None and current_images_seen >= next_eval_images:
+                run_eval(
+                    epoch=epoch,
+                    images_seen=current_images_seen,
+                    trigger=f"images-{next_eval_images}",
+                )
+                next_eval_images += eval_every_images
+
+        train_metrics = _train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device=device,
+            config=config,
+            images_seen_before_epoch=epoch_images_before,
+            step_callback=on_step,
+        )
+        images_seen_total = epoch_images_before + int(train_metrics.get("images_seen_epoch", 0))
         train_metrics["epoch"] = epoch
+        train_metrics["images_seen"] = float(images_seen_total)
         log_event(train_log, train_metrics)
         _console_print(
             config,
@@ -565,50 +692,18 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
                 f"[train-epoch] epoch={epoch} loss={train_metrics['loss']:.4f} "
                 f"coarse={train_metrics['coarse_loss']:.4f} fine={train_metrics['fine_loss']:.4f} "
                 f"retrieval={train_metrics['retrieval_loss']:.4f} "
-                f"sps={train_metrics['samples_per_sec']:.1f} seconds={train_metrics['epoch_seconds']:.1f}"
+                f"sps={train_metrics['samples_per_sec']:.1f} seconds={train_metrics['epoch_seconds']:.1f} "
+                f"images={images_seen_total}"
             ),
         )
 
-        eval_started = time.perf_counter()
-        _console_print(config, f"[eval-start] epoch={epoch}")
-        eval_metrics = _evaluate(
-            model,
-            train_ds,
-            val_loader,
-            train_frame,
-            label_maps,
-            device=device,
-            config=config,
-        )
-        eval_metrics["eval_seconds"] = time.perf_counter() - eval_started
-        eval_metrics["epoch"] = epoch
-        log_event(val_log, eval_metrics)
-        _console_print(
-            config,
-            (
-                f"[eval-epoch] epoch={epoch} median_km={eval_metrics['median_km']:.1f} "
-                f"mean_km={eval_metrics['mean_km']:.1f} within_2500km={eval_metrics.get('within_2500km', 0.0):.4f} "
-                f"coarse_top1={eval_metrics['coarse_top1']:.4f} seconds={eval_metrics['eval_seconds']:.1f}"
-            ),
-        )
-        scheduler.step()
-
-        if eval_metrics["median_km"] < best_metric:
-            best_metric = eval_metrics["median_km"]
-            _save_checkpoint(
-                best_checkpoint,
-                model=model,
-                optimizer=optimizer,
-                config=config,
+        if last_eval_images_seen < images_seen_total:
+            run_eval(
                 epoch=epoch,
-                metrics=eval_metrics,
-                label_maps=label_maps,
-                cell_centers=cell_store.centers,
+                images_seen=images_seen_total,
+                trigger="epoch-end",
             )
-            _console_print(
-                config,
-                f"[checkpoint] epoch={epoch} best_median_km={best_metric:.1f} path={best_checkpoint}",
-            )
+        scheduler.step()
 
     summary = {
         "experiment_name": config["experiment_name"],
@@ -624,6 +719,7 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         "loader_seconds": loader_seconds,
         "model_init_seconds": model_init_seconds,
         "use_streaming_train_dataset": bool(config["train"].get("use_streaming_train_dataset", False)),
+        "images_seen_total": images_seen_total,
     }
     save_summary(run_dirs["root"] / "summary.json", summary)
     return summary
