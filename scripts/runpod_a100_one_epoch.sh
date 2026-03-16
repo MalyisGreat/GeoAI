@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 export PYTHONUNBUFFERED=1
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_HUB_ENABLE_HF_TRANSFER=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 export TOKENIZERS_PARALLELISM=false
@@ -17,8 +18,8 @@ CONFIG_PATH="${CONFIG_PATH:-configs/runpod_a100_vitl_1epoch.yaml}"
 MAX_WORKERS="${MAX_WORKERS:-64}"
 mkdir -p "${LOG_DIR}"
 
-python -m pip install --upgrade pip
 python -m pip install -e ".[accelerated]"
+python -c "import torch; print(f'torch={torch.__version__} cuda={torch.version.cuda} cuda_available={torch.cuda.is_available()}')"
 
 echo "[${RUN_STAMP}] syncing OSV-5M to ${ROOT_DIR}"
 python scripts/a100_parallel_download.py \

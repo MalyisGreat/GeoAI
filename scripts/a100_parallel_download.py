@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from _bootstrap import bootstrap_project_src
+
+bootstrap_project_src(PROJECT_ROOT)
 
 from huggingface_hub import snapshot_download
 

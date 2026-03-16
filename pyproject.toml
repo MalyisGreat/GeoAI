@@ -16,7 +16,7 @@ dependencies = [
   "pyarrow>=16.0",
   "PyYAML>=6.0",
   "requests>=2.32",
-  "torch>=2.8.0",
+  "torch>=2.4.0",
 ]
 
 [project.optional-dependencies]
