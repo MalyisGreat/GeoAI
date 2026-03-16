@@ -344,6 +344,12 @@ def _train_one_epoch(
             config["train"].get("log_every_steps", 20),
         )
     )
+    console_log_every_images = int(config["train"].get("console_log_every_images", 0) or 0)
+    next_console_images = (
+        ((images_seen_before_epoch // console_log_every_images) + 1) * console_log_every_images
+        if _console_enabled(config) and console_log_every_images > 0
+        else None
+    )
     try:
         total_steps = len(loader)
     except TypeError:
@@ -402,7 +408,14 @@ def _train_one_epoch(
             log_event(epoch_log_path, step_payload)
         if step_callback is not None:
             step_callback(step_payload)
-        if _console_enabled(config) and step % max(1, console_log_every) == 0:
+        should_console_log = False
+        if next_console_images is not None:
+            while next_console_images is not None and step_payload["images_seen"] >= next_console_images:
+                should_console_log = True
+                next_console_images += console_log_every_images
+        elif _console_enabled(config) and step % max(1, console_log_every) == 0:
+            should_console_log = True
+        if should_console_log:
             step_label = f"{step}/{total_steps}" if total_steps is not None else str(step)
             gpu_memory_mb = ""
             if device.type == "cuda":
