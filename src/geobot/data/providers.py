@@ -164,7 +164,14 @@ class OSV5MProvider:
                 destination,
                 chunk_size_mb=self.config["download"].get("chunk_size_mb", 4),
             )
+        full_metadata_path = self.raw_root / f"{split}.csv"
         destination = self.raw_root / f"{split}_head_{max_rows}.csv"
+        if destination.exists():
+            return destination
+        if full_metadata_path.exists():
+            frame = pd.read_csv(full_metadata_path, nrows=max_rows)
+            frame.to_csv(destination, index=False)
+            return destination
         return stream_csv_sample(
             metadata_url,
             destination,
