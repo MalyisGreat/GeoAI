@@ -194,9 +194,12 @@ def main() -> None:
     built_manifests = []
     manifest_started = time.perf_counter()
     for split in args.splits:
+        manifest_max_rows = None
+        if split == "train":
+            manifest_max_rows = config["data"].get("max_train_rows")
         result = provider.prepare(
             split=split,
-            max_rows=None,
+            max_rows=manifest_max_rows,
             download_images=False,
             force_rebuild=args.force_manifest,
         )

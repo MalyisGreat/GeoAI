@@ -5,7 +5,7 @@ data:
   provider: osv5m
   provider_root: data/osv5m
   require_archive_rows: true
-  train_manifest: data/osv5m/manifests/train.parquet
+  train_manifest: data/osv5m/manifests/train_head_400000.parquet
   val_manifest: null
   image_root: data/osv5m/raw
   val_fraction: 0.02

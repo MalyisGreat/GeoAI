@@ -27,17 +27,20 @@ def main() -> None:
 
     config = load_config(args.config)
     train_manifest = Path(config["data"]["train_manifest"])
+    prepare_max_rows = args.max_rows
+    if prepare_max_rows is None:
+        prepare_max_rows = config["data"].get("max_train_rows")
     if args.prepare or not train_manifest.exists():
         provider = get_provider(config)
         if config["data"]["provider"] == "osv5m":
             result = provider.prepare(
                 split="train",
-                max_rows=args.max_rows,
+                max_rows=prepare_max_rows,
                 download_images=args.download_images,
                 shard_limit=args.shard_limit,
             )
         else:
-            result = provider.prepare(max_rows=args.max_rows)
+            result = provider.prepare(max_rows=prepare_max_rows)
         config["data"]["train_manifest"] = result.manifest_path
         config["data"]["image_root"] = result.image_root
 
