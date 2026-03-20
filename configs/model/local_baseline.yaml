@@ -1,0 +1,28 @@
+image_size: 224
+backbone_family: convnext
+backbone:
+  timm_name: convnext_tiny
+  pretrained: true
+  drop_path_rate: 0.1
+  train_backbone: true
+  checkpoint_gradients: false
+adapter:
+  enabled: true
+  bottleneck_dim: 256
+  dropout: 0.1
+  gate_init: 0.25
+head:
+  geocell_classes: 4096
+  hidden_dim: 512
+  embedding_dim: 256
+  dropout: 0.2
+  predict_geocell: true
+  predict_uncertainty: true
+loss:
+  geocell_weight: 1.0
+  geodesic_weight: 0.75
+  embedding_weight: 0.02
+  label_smoothing: 0.05
+export:
+  example_image_size: 224
+  dynamic_batch: true

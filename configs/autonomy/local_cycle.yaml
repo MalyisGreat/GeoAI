@@ -1,0 +1,42 @@
+name: local-autolab
+run_root: runs/autonomy
+history_path: runs/autonomy/history.jsonl
+max_cycles: 3
+candidates_per_cycle: 3
+continue_until_target: false
+target_median_km:
+target_within_100km:
+target_geocell_top1:
+model_config_path: configs/model/local_baseline.yaml
+train:
+  manifest_path: data/manifest.csv
+  run_dir: runs/autonomy/manual
+  batch_size: 12
+  eval_batch_size: 24
+  grad_accum_steps: 2
+  num_workers: 4
+  max_epochs: 5
+  learning_rate: 0.0003
+  backbone_lr_scale: 0.2
+  weight_decay: 0.05
+  max_grad_norm: 1.0
+  warmup_fraction: 0.1
+  amp: true
+  pin_memory: true
+  seed: 1337
+  log_every: 20
+  augmentation:
+    resize_scale_min: 0.7
+    color_jitter: 0.2
+    blur_prob: 0.15
+    grayscale_prob: 0.05
+    random_erasing_prob: 0.15
+evaluation:
+  distance_thresholds_km: [1, 25, 100, 750, 2500]
+  max_primary_metric_km: 2500.0
+  min_within_100km: 0.08
+  min_worst_group_within_100km: 0.03
+  max_group_gap_ratio: 4.0
+  max_ece: 0.35
+  max_confidence_gap: 0.35
+  suspicious_geocell_gap: 0.25

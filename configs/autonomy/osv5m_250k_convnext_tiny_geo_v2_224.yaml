@@ -1,0 +1,56 @@
+name: osv5m-250k-convnext-tiny-geo-v2-224
+run_root: runs/osv5m_250k_convnext_tiny_geo_v2_224
+history_path: runs/osv5m_250k_convnext_tiny_geo_v2_224/history.jsonl
+max_cycles: 1
+candidates_per_cycle: 1
+continue_until_target: false
+target_median_km:
+target_within_100km:
+target_geocell_top1:
+model_config_path: configs/model/osv5m_convnext_tiny_geo_v2_224.yaml
+train:
+  manifest_path: data/osv5m_250k/manifest.csv
+  run_dir: runs/osv5m_250k_convnext_tiny_geo_v2_224/manual
+  init_checkpoint: runs/osv5m_250k_convnext_tiny_resume_192/cycle-00-bootstrap/best.pt
+  batch_size: 16
+  eval_batch_size: 32
+  grad_accum_steps: 1
+  num_workers: 6
+  max_epochs: 2
+  learning_rate: 0.0002
+  backbone_lr_scale: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_fraction: 0.03
+  amp: true
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor:
+  cudnn_benchmark: true
+  channels_last: false
+  seed: 1337
+  max_train_samples: 225158
+  max_val_samples: 24842
+  eval_every_images: 30000
+  log_every: 100
+  positive_pair_sampling: true
+  positive_pair_fallback: self
+  balance_groups: true
+  group_key: geo_region
+  geo_region_lat_bins: 6
+  geo_region_lon_bins: 12
+  augmentation:
+    resize_scale_min: 0.8
+    color_jitter: 0.15
+    blur_prob: 0.1
+    grayscale_prob: 0.03
+    random_erasing_prob: 0.08
+evaluation:
+  distance_thresholds_km: [1, 25, 100, 750, 2500]
+  max_primary_metric_km: 2500.0
+  min_within_100km: 0.02
+  min_worst_group_within_100km: 0.005
+  max_group_gap_ratio: 6.0
+  max_ece: 0.5
+  max_confidence_gap: 0.5
+  suspicious_geocell_gap: 0.5

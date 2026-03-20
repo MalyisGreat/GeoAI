@@ -1,0 +1,43 @@
+image_size: 224
+backbone_family: convnext
+backbone:
+  timm_name: convnext_small
+  pretrained: true
+  drop_path_rate: 0.1
+  train_backbone: true
+  checkpoint_gradients: false
+adapter:
+  enabled: true
+  bottleneck_dim: 384
+  dropout: 0.1
+  gate_init: 0.25
+head:
+  country_classes: 0
+  region_classes: 0
+  geocell_classes: 0
+  hidden_dim: 512
+  embedding_dim: 256
+  dropout: 0.15
+  predict_country: true
+  predict_region: true
+  predict_geocell: true
+  predict_uncertainty: true
+  decode_topk: 8
+  max_offset_norm: 0.08
+  decode_confidence_threshold: 0.08
+  decode_confidence_sharpness: 18.0
+loss:
+  country_weight: 0.4
+  region_weight: 0.4
+  geocell_weight: 1.0
+  geodesic_weight: 0.75
+  embedding_weight: 0.05
+  offset_weight: 0.15
+  hierarchy_consistency_weight: 0.05
+  label_smoothing: 0.03
+  contrastive_temperature: 0.07
+  spatial_geocell_radius_km: 250.0
+  spatial_geocell_topk: 16
+export:
+  example_image_size: 224
+  dynamic_batch: true

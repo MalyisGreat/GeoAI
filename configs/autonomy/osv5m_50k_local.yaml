@@ -1,0 +1,44 @@
+name: osv5m-50k-local
+run_root: runs/osv5m_50k
+history_path: runs/osv5m_50k/history.jsonl
+max_cycles: 1
+candidates_per_cycle: 1
+continue_until_target: false
+target_median_km:
+target_within_100km:
+target_geocell_top1:
+model_config_path: configs/model/osv5m_frozen_local.yaml
+train:
+  manifest_path: data/osv5m_50k/manifest.csv
+  run_dir: runs/osv5m_50k/manual
+  batch_size: 48
+  eval_batch_size: 96
+  grad_accum_steps: 1
+  num_workers: 6
+  max_epochs: 1
+  learning_rate: 0.001
+  backbone_lr_scale: 0.0
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_fraction: 0.05
+  amp: true
+  pin_memory: true
+  seed: 1337
+  max_train_samples: 50000
+  max_val_samples: 5000
+  log_every: 50
+  augmentation:
+    resize_scale_min: 0.8
+    color_jitter: 0.15
+    blur_prob: 0.1
+    grayscale_prob: 0.03
+    random_erasing_prob: 0.08
+evaluation:
+  distance_thresholds_km: [1, 25, 100, 750, 2500]
+  max_primary_metric_km: 2500.0
+  min_within_100km: 0.01
+  min_worst_group_within_100km: 0.0
+  max_group_gap_ratio: 10.0
+  max_ece: 0.5
+  max_confidence_gap: 0.5
+  suspicious_geocell_gap: 0.5

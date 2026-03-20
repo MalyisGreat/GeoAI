@@ -1,0 +1,33 @@
+model_config_path: configs/model/throughput_convnext_tiny.yaml
+train:
+  manifest_path: data/osv5m_benchmark_10k/manifest.csv
+  run_dir: runs/training_speed_loop
+  batch_size: 20
+  eval_batch_size: 32
+  grad_accum_steps: 1
+  num_workers: 6
+  max_epochs: 1
+  learning_rate: 0.0004
+  backbone_lr_scale: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_fraction: 0.05
+  amp: true
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor:
+  cudnn_benchmark: true
+  channels_last: false
+  seed: 1337
+  max_train_samples: 10000
+  max_val_samples: 2000
+  log_every: 100
+  augmentation:
+    resize_scale_min: 0.8
+    color_jitter: 0.15
+    blur_prob: 0.1
+    grayscale_prob: 0.03
+    random_erasing_prob: 0.08
+time_budget_sec: 30
+warmup_steps: 5
+max_steps: 200

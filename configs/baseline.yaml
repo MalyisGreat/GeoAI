@@ -1,0 +1,64 @@
+name: local-baseline
+backbone:
+  model_name: convnext_tiny
+  pretrained: true
+  dropout: 0.2
+  hidden_dim: 384
+  num_cells: 0
+training:
+  manifest_path: data/manifest.jsonl
+  image_size: 256
+  batch_size: 8
+  grad_accum_steps: 2
+  epochs: 3
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  num_workers: 4
+  amp: true
+  coord_loss_weight: 1.0
+  cell_loss_weight: 0.3
+  train_split: train
+  val_split: val
+  stress_split: stress
+  seed: 7
+eval:
+  primary_metric: median_km
+  max_train_val_gap: 0.35
+  min_primary_improvement: 0.01
+  max_worst_bucket_drop: 0.03
+  max_confidence_error: 0.20
+  ood_floor_ratio: 0.92
+  promote_if_no_incumbent: true
+autonomy:
+  max_cycles: 4
+  random_seed: 7
+  exploration_probability: 0.35
+  candidate_backbones:
+    - convnext_tiny
+    - efficientnet_b3
+    - resnet50
+  candidate_image_sizes:
+    - 224
+    - 256
+    - 288
+    - 320
+  candidate_batch_sizes:
+    - 6
+    - 8
+    - 12
+    - 16
+  candidate_learning_rates:
+    - 0.0001
+    - 0.0002
+    - 0.0003
+    - 0.0005
+  candidate_dropouts:
+    - 0.1
+    - 0.2
+    - 0.3
+  candidate_hidden_dims:
+    - 256
+    - 384
+    - 512
+  autopromote_first_result: true
+  stop_after_rejections: 3

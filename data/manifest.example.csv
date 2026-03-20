@@ -1,0 +1,4 @@
+image_path,latitude,longitude,geocell_id,split,domain,source
+images/sample_train_001.jpg,41.8781,-87.6298,1024,train,urban,streetview
+images/sample_train_002.jpg,34.0522,-118.2437,2210,train,urban,streetview
+images/sample_val_001.jpg,47.6062,-122.3321,1877,val,urban,streetview
